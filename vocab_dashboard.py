@@ -27,34 +27,24 @@ def infer_cluster(word):
             return cl
     return "Uncategorized"
 
-def fetch_ipa(word):
-    try:
-        r = requests.get(f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}", timeout=5)
-        r.raise_for_status()
-        data = r.json()
-        for entry in data:
-            phonetic = entry.get("phonetic") or (entry.get("phonetics") or [{}])[0].get("text")
-            if phonetic:
-                return phonetic
-    except:
-        pass
-    return ""
-
-# Load or refresh word list with caching
+# Load or refresh word list with caching (no IPA fetch)
 @st.cache_data
 def load_words():
     df = pd.read_csv(CSV_URL)
     orig = df.columns.tolist()
     df.columns = df.columns.str.strip().str.lower()
-    if 'word' not in df.columns and len(df.columns)>=1:
-        df.rename(columns={df.columns[0]:'word'}, inplace=True)
-    if 'translation' not in df.columns and len(df.columns)>=3:
-        df.rename(columns={df.columns[2]:'translation'}, inplace=True)
+    # Map positional headers if needed
+    if 'word' not in df.columns and len(df.columns) >= 1:
+        df.rename(columns={df.columns[0]: 'word'}, inplace=True)
+    if 'translation' not in df.columns and len(df.columns) >= 3:
+        df.rename(columns={df.columns[2]: 'translation'}, inplace=True)
     if 'word' not in df.columns or 'translation' not in df.columns:
         st.error(f"Sheet must contain 'word' and 'translation'. Found: {orig}")
         return pd.DataFrame(columns=['word','ipa','translation','cluster'])
+    # Infer cluster, leave IPA blank for speed
     df['cluster'] = df.get('cluster', df['word'].apply(infer_cluster))
-    df['ipa'] = df.get('ipa', df['word'].apply(fetch_ipa))
+    df['ipa'] = ''  # skip IPA fetch on load for performance
+    # Cache locally
     df.to_csv(LOCAL_FILE, index=False)
     return df
 
@@ -65,7 +55,8 @@ def load_tracking():
         return pd.read_csv(TRACK_FILE, parse_dates=['date'])
     return pd.DataFrame(columns=['date','time_spent','score'])
 
-def save_tracking(df): df.to_csv(TRACK_FILE, index=False)
+def save_tracking(df):
+    df.to_csv(TRACK_FILE, index=False)
 
 def cluster_for_date(df, d):
     clusters = sorted(df['cluster'].dropna().unique())
@@ -83,11 +74,10 @@ track = load_tracking()
 
 if page == "Daily Practice":
     st.header("📝 Daily Practice")
-    # Determine today's cluster
     sel_date = st.date_input("Practice date:", date.today())
     today_cluster = cluster_for_date(data, sel_date)
     st.subheader(f"Today's Cluster: {today_cluster}")
-    # Visual cluster display: show all clusters as tabs
+    # Display clusters as tabs
     cluster_list = sorted(data['cluster'].unique())
     tabs = st.tabs(cluster_list)
     for tab, cl in zip(tabs, cluster_list):
@@ -99,7 +89,7 @@ if page == "Daily Practice":
                 col.markdown(f"**{row['word']}**")
                 col.markdown(f"/{row['ipa']}/")
                 col.markdown(row['translation'])
-    # Timer controls
+    # Timer
     if 'start' not in st.session_state: st.session_state.start = None
     if 'time_spent' not in st.session_state: st.session_state.time_spent = 0
     c1, c2 = st.columns(2)
@@ -108,7 +98,7 @@ if page == "Daily Practice":
         delta = datetime.now() - st.session_state.start
         st.session_state.time_spent = int(delta.total_seconds()//60)
         st.success(f"Time: {st.session_state.time_spent} min")
-    # Fill-in quiz from today's cluster
+    # Quiz
     cluster_words = data[data['cluster']==today_cluster].sample(min(5,len(data[data['cluster']==today_cluster])))
     form = st.form("quiz")
     answers = {}
