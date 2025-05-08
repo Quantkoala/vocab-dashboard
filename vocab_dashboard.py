@@ -4,13 +4,12 @@ import os
 import requests
 from datetime import date, datetime
 
-# Configuration
-SHEET_ID = "1IIjvTR_UAeWFCO8Cp_LqlXoegetyMy4Nxxgk74L03G0"
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+# Configuration: published CSV link for enriched word list
+CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSNbtoid2HrjpXgDu_Wb36swU0Pd1zMM7jr2igAV8z3QCp3pujWbiWN4IbDLgqMCA/pub?gid=863936811&single=true&output=csv"
 LOCAL_FILE = "words_local.csv"
 TRACK_FILE = "tracking.csv"
 
-# Keyword‑based cluster mapping
+# Keyword-based cluster mapping
 cluster_keywords = {
     "Communication Strategies": ["articulate","paraphrase","nuance","elucidate","enunciate","concise","coherent","summarize","verbatim","gist"],
     "Emotional States & Reactions": ["pang","ambivalence","resilience"],
@@ -43,11 +42,20 @@ def fetch_ipa(word):
 
 def fetch_and_save():
     df = pd.read_csv(CSV_URL)
+    original_cols = df.columns.tolist()
     df.columns = df.columns.str.strip().str.lower()
-    if 'word' not in df or 'translation' not in df:
-        st.error("Sheet must contain 'word' and 'translation' columns.")
-    if 'cluster' not in df: df['cluster'] = df['word'].apply(infer_cluster)
-    if 'ipa' not in df: df['ipa'] = df['word'].apply(fetch_ipa)
+    # Map by position if needed
+    if 'word' not in df.columns and len(df.columns) >= 1:
+        df = df.rename(columns={df.columns[0]: 'word'})
+    if 'translation' not in df.columns and len(df.columns) >= 3:
+        df = df.rename(columns={df.columns[2]: 'translation'})
+    if 'word' not in df.columns or 'translation' not in df.columns:
+        st.error(f"Sheet must contain 'word' and 'translation' columns. Found: {original_cols}")
+        return pd.DataFrame(columns=['word','ipa','translation','cluster'])
+    if 'cluster' not in df.columns:
+        df['cluster'] = df['word'].apply(infer_cluster)
+    if 'ipa' not in df.columns:
+        df['ipa'] = df['word'].apply(fetch_ipa)
     df.to_csv(LOCAL_FILE, index=False)
     return df
 
@@ -56,8 +64,10 @@ def load_words():
     if os.path.exists(LOCAL_FILE):
         df = pd.read_csv(LOCAL_FILE)
         df.columns = df.columns.str.strip().str.lower()
-        if 'cluster' not in df: df['cluster'] = df['word'].apply(infer_cluster)
-        if 'ipa' not in df: df['ipa'] = df['word'].apply(fetch_ipa)
+        if 'cluster' not in df.columns:
+            df['cluster'] = df['word'].apply(infer_cluster)
+        if 'ipa' not in df.columns:
+            df['ipa'] = df['word'].apply(fetch_ipa)
         return df
     return fetch_and_save()
 
@@ -70,11 +80,12 @@ def save_tracking(df):
     df.to_csv(TRACK_FILE, index=False)
 
 def cluster_for_date(df, d):
-    if 'cluster' not in df: df['cluster'] = df['word'].apply(infer_cluster)
+    if 'cluster' not in df.columns:
+        df['cluster'] = df['word'].apply(infer_cluster)
     clusters = sorted(df['cluster'].dropna().unique())
     return clusters[d.toordinal() % len(clusters)] if clusters else ""
 
-# UI
+# Streamlit UI
 st.sidebar.title("Vocabulary Dashboard")
 if os.path.exists(LOCAL_FILE):
     mtime = datetime.fromtimestamp(os.path.getmtime(LOCAL_FILE))
@@ -83,10 +94,10 @@ if os.path.exists(LOCAL_FILE):
 else:
     st.sidebar.info("No local file yet.")
 
-if st.sidebar.button("🔄 Refresh Vocabulary"):
+if st.sidebar.button("🔄 Refresh Vocabulary from CSV"):
     st.cache_data.clear()
     df_refreshed = fetch_and_save()
-    st.sidebar.success(f"Fetched {len(df_refreshed)} words")
+    st.sidebar.success(f"Fetched {len(df_refreshed)} words from CSV")
 
 page = st.sidebar.radio("Go to", ["Daily Exercise","Cluster Summary","Learning Outcome Tracking","Export Enriched Vocabulary"])
 
@@ -95,7 +106,7 @@ track_df = load_tracking()
 
 if page=="Daily Exercise":
     st.header("📖 Daily Exercise")
-    d=st.date_input("Practice date:",date.today())
+    d=st.date_input("Practice date:", date.today())
     cl=cluster_for_date(data,d)
     st.subheader(f"Cluster for {d}: {cl}")
     if cl: st.table(data[data['cluster']==cl][['word','ipa','translation']])
@@ -118,10 +129,10 @@ elif page=="Cluster Summary":
     df_f=data[data['cluster'].isin(sel)]
     q=st.text_input("Search:")
     if q:
-        mask=df_f[['word','translation']].apply(lambda c: c.str.contains(q,case=False,na=False))
+        mask=df_f[['word','translation']].apply(lambda c:c.str.contains(q,case=False,na=False))
         df_f=df_f[mask.any(axis=1)]
     for c in sel: st.subheader(c); st.table(df_f[df_f['cluster']==c][['word','ipa','translation']])
-    st.download_button("Download CSV",df_f.to_csv(index=False),"vocab_summary.csv","text/csv")
+    st.download_button("Download CSV",data=df_f.to_csv(index=False),file_name="vocab_summary.csv",mime="text/csv")
 elif page=="Learning Outcome Tracking":
     st.header("📊 Learning Outcome Tracking")
     if track_df.empty: st.info("No records yet.")
@@ -132,12 +143,12 @@ elif page=="Learning Outcome Tracking":
         st.subheader(f"{sd} to {ed}"); st.dataframe(df_t)
         st.line_chart(df_t.set_index('date')[['time_spent','exercises_completed','score']])
         st.bar_chart(df_t.set_index('date')['score'])
-        st.download_button("Download Progress",df_t.to_csv(index=False),"vocab_progress.csv","text/csv")
-        st.sidebar.download_button("Download All",track_df.to_csv(index=False),"vocab_all_progress.csv","text/csv")
+        st.download_button("Download Progress",data=df_t.to_csv(index=False),file_name="vocab_progress.csv",mime="text/csv")
+        st.sidebar.download_button("Download All",data=track_df.to_csv(index=False),file_name="vocab_all_progress.csv",mime="text/csv")
 else:
     st.header("📥 Export Enriched Vocabulary")
     if st.button("Generate & Download"):
         df_e=data.copy()
         df_e['ipa']=df_e['word'].apply(fetch_ipa)
         df_e['cluster']=df_e['word'].apply(infer_cluster)
-        st.download_button("Download enriched CSV",df_e.to_csv(index=False),"vocab_enriched.csv","text/csv")
+        st.download_button("Download enriched CSV",data=df_e.to_csv(index=False),file_name="vocab_enriched.csv",mime="text/csv")
