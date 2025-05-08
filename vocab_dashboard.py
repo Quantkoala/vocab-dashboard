@@ -9,7 +9,7 @@ CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSNbtoid2HrjpXgDu_Wb3
 LOCAL_FILE = "words_local.csv"
 TRACK_FILE = "tracking.csv"
 
-# Keyword-based cluster mapping
+# Cluster keywords mapping
 cluster_keywords = {
     "Communication Strategies": ["articulate","paraphrase","nuance","elucidate","enunciate","concise","coherent","summarize","verbatim","gist"],
     "Emotional States & Reactions": ["pang","ambivalence","resilience"],
@@ -40,115 +40,91 @@ def fetch_ipa(word):
         pass
     return ""
 
-def fetch_and_save():
+# Load or refresh word list with caching
+@st.cache_data
+def load_words():
     df = pd.read_csv(CSV_URL)
-    original_cols = df.columns.tolist()
+    orig = df.columns.tolist()
     df.columns = df.columns.str.strip().str.lower()
-    # Map by position if needed
-    if 'word' not in df.columns and len(df.columns) >= 1:
-        df = df.rename(columns={df.columns[0]: 'word'})
-    if 'translation' not in df.columns and len(df.columns) >= 3:
-        df = df.rename(columns={df.columns[2]: 'translation'})
+    if 'word' not in df.columns and len(df.columns)>=1:
+        df.rename(columns={df.columns[0]:'word'}, inplace=True)
+    if 'translation' not in df.columns and len(df.columns)>=3:
+        df.rename(columns={df.columns[2]:'translation'}, inplace=True)
     if 'word' not in df.columns or 'translation' not in df.columns:
-        st.error(f"Sheet must contain 'word' and 'translation' columns. Found: {original_cols}")
+        st.error(f"Sheet must contain 'word' and 'translation'. Found: {orig}")
         return pd.DataFrame(columns=['word','ipa','translation','cluster'])
-    if 'cluster' not in df.columns:
-        df['cluster'] = df['word'].apply(infer_cluster)
-    if 'ipa' not in df.columns:
-        df['ipa'] = df['word'].apply(fetch_ipa)
+    df['cluster'] = df.get('cluster', df['word'].apply(infer_cluster))
+    df['ipa'] = df.get('ipa', df['word'].apply(fetch_ipa))
     df.to_csv(LOCAL_FILE, index=False)
     return df
 
+# Tracking
 @st.cache_data
-def load_words():
-    if os.path.exists(LOCAL_FILE):
-        df = pd.read_csv(LOCAL_FILE)
-        df.columns = df.columns.str.strip().str.lower()
-        if 'cluster' not in df.columns:
-            df['cluster'] = df['word'].apply(infer_cluster)
-        if 'ipa' not in df.columns:
-            df['ipa'] = df['word'].apply(fetch_ipa)
-        return df
-    return fetch_and_save()
-
 def load_tracking():
     if os.path.exists(TRACK_FILE):
         return pd.read_csv(TRACK_FILE, parse_dates=['date'])
-    return pd.DataFrame(columns=['date','time_spent','exercises_completed','score'])
+    return pd.DataFrame(columns=['date','time_spent','score'])
 
-def save_tracking(df):
-    df.to_csv(TRACK_FILE, index=False)
+def save_tracking(df): df.to_csv(TRACK_FILE, index=False)
 
 def cluster_for_date(df, d):
-    if 'cluster' not in df.columns:
-        df['cluster'] = df['word'].apply(infer_cluster)
     clusters = sorted(df['cluster'].dropna().unique())
     return clusters[d.toordinal() % len(clusters)] if clusters else ""
 
-# Streamlit UI
+# App UI
 st.sidebar.title("Vocabulary Dashboard")
-if os.path.exists(LOCAL_FILE):
-    mtime = datetime.fromtimestamp(os.path.getmtime(LOCAL_FILE))
-    count = pd.read_csv(LOCAL_FILE).shape[0]
-    st.sidebar.info(f"Local file: {LOCAL_FILE}\nUpdated: {mtime:%Y-%m-%d %H:%M}\nWords: {count}")
-else:
-    st.sidebar.info("No local file yet.")
-
-if st.sidebar.button("🔄 Refresh Vocabulary from CSV"):
-    st.cache_data.clear()
-    df_refreshed = fetch_and_save()
-    st.sidebar.success(f"Fetched {len(df_refreshed)} words from CSV")
-
-page = st.sidebar.radio("Go to", ["Daily Exercise","Cluster Summary","Learning Outcome Tracking","Export Enriched Vocabulary"])
+if st.sidebar.button("🔄 Refresh Words"):
+    load_words()
+    st.sidebar.success("Words refreshed")
+page = st.sidebar.radio("Go to", ["Daily Practice","Learning Outcome Tracking"])
 
 data = load_words()
-track_df = load_tracking()
+track = load_tracking()
 
-if page=="Daily Exercise":
-    st.header("📖 Daily Exercise")
-    d=st.date_input("Practice date:", date.today())
-    cl=cluster_for_date(data,d)
-    st.subheader(f"Cluster for {d}: {cl}")
-    if cl: st.table(data[data['cluster']==cl][['word','ipa','translation']])
-    if 'start' not in st.session_state: st.session_state.start=None
-    if st.button("Start Timer"): st.session_state.start=datetime.now()
-    if st.button("Stop Timer") and st.session_state.start:
-        elapsed=(datetime.now()-st.session_state.start).seconds//60
-        st.session_state.time_spent=elapsed; st.success(f"Time: {elapsed} min")
-    if 'count' not in st.session_state: st.session_state.count=0
-    if st.button("+1 Exercise Completed"): st.session_state.count+=1
-    st.write(f"Exercises: {st.session_state.count}")
-    score=st.number_input("Today's score (0-20)",0,20,0)
-    if st.button("Submit"):
-        entry={'date':d,'time_spent':st.session_state.get('time_spent',0),'exercises_completed':st.session_state.count,'score':score}
-        track_df=pd.concat([track_df,pd.DataFrame([entry])],ignore_index=True)
-        save_tracking(track_df); st.success("Recorded!")
-elif page=="Cluster Summary":
-    st.header("📋 Cluster Summary")
-    sel=st.multiselect("Clusters:",sorted(data['cluster'].unique()),default=sorted(data['cluster'].unique()))
-    df_f=data[data['cluster'].isin(sel)]
-    q=st.text_input("Search:")
-    if q:
-        mask=df_f[['word','translation']].apply(lambda c:c.str.contains(q,case=False,na=False))
-        df_f=df_f[mask.any(axis=1)]
-    for c in sel: st.subheader(c); st.table(df_f[df_f['cluster']==c][['word','ipa','translation']])
-    st.download_button("Download CSV",data=df_f.to_csv(index=False),file_name="vocab_summary.csv",mime="text/csv")
-elif page=="Learning Outcome Tracking":
-    st.header("📊 Learning Outcome Tracking")
-    if track_df.empty: st.info("No records yet.")
-    else:
-        min_d,max_d=track_df['date'].min().date(),track_df['date'].max().date()
-        sd,ed=st.date_input("Select date range:",[min_d,max_d],min_value=min_d,max_value=max_d)
-        df_t=track_df[(track_df['date']>=pd.to_datetime(sd))&(track_df['date']<=pd.to_datetime(ed))]
-        st.subheader(f"{sd} to {ed}"); st.dataframe(df_t)
-        st.line_chart(df_t.set_index('date')[['time_spent','exercises_completed','score']])
-        st.bar_chart(df_t.set_index('date')['score'])
-        st.download_button("Download Progress",data=df_t.to_csv(index=False),file_name="vocab_progress.csv",mime="text/csv")
-        st.sidebar.download_button("Download All",data=track_df.to_csv(index=False),file_name="vocab_all_progress.csv",mime="text/csv")
+if page == "Daily Practice":
+    st.header("📝 Daily Practice")
+    # Determine today's cluster
+    sel_date = st.date_input("Practice date:", date.today())
+    today_cluster = cluster_for_date(data, sel_date)
+    st.subheader(f"Today's Cluster: {today_cluster}")
+    # Visual cluster display: show all clusters as tabs
+    cluster_list = sorted(data['cluster'].unique())
+    tabs = st.tabs(cluster_list)
+    for tab, cl in zip(tabs, cluster_list):
+        with tab:
+            words_cl = data[data['cluster']==cl][['word','ipa','translation']]
+            cols = st.columns(3)
+            for i, row in words_cl.iterrows():
+                col = cols[i % 3]
+                col.markdown(f"**{row['word']}**")
+                col.markdown(f"/{row['ipa']}/")
+                col.markdown(row['translation'])
+    # Timer controls
+    if 'start' not in st.session_state: st.session_state.start = None
+    if 'time_spent' not in st.session_state: st.session_state.time_spent = 0
+    c1, c2 = st.columns(2)
+    if c1.button("Start Timer"): st.session_state.start = datetime.now()
+    if c2.button("Stop Timer") and st.session_state.start:
+        delta = datetime.now() - st.session_state.start
+        st.session_state.time_spent = int(delta.total_seconds()//60)
+        st.success(f"Time: {st.session_state.time_spent} min")
+    # Fill-in quiz from today's cluster
+    cluster_words = data[data['cluster']==today_cluster].sample(min(5,len(data[data['cluster']==today_cluster])))
+    form = st.form("quiz")
+    answers = {}
+    for idx, row in cluster_words.iterrows():
+        answers[idx] = form.text_input(f"Spell the word for '{row['translation']}'", key=f"ans{idx}")
+    submitted = form.form_submit_button("Submit Answers")
+    if submitted:
+        score = sum(1 for idx,row in cluster_words.iterrows() if answers[idx].strip().lower()==row['word'].lower())
+        st.write(f"Score: {score}/{len(cluster_words)}")
+        track = pd.concat([track, pd.DataFrame([{'date':sel_date,'time_spent':st.session_state.time_spent,'score':score}])], ignore_index=True)
+        save_tracking(track)
+
 else:
-    st.header("📥 Export Enriched Vocabulary")
-    if st.button("Generate & Download"):
-        df_e=data.copy()
-        df_e['ipa']=df_e['word'].apply(fetch_ipa)
-        df_e['cluster']=df_e['word'].apply(infer_cluster)
-        st.download_button("Download enriched CSV",data=df_e.to_csv(index=False),file_name="vocab_enriched.csv",mime="text/csv")
+    st.header("📊 Learning Outcome Tracking")
+    if track.empty:
+        st.info("No records yet.")
+    else:
+        st.line_chart(track.set_index('date')[['time_spent','score']])
+        st.table(track)
